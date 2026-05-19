@@ -1,0 +1,4 @@
+interface:
+  display_name: "JD Read HTML Bookshelf"
+  short_description: "Optimize exported ebook HTML into searchable doc sites"
+  default_prompt: "Use $jd-read-html-bookshelf to optimize a newly exported JD Read book HTML and add it to the bookshelf homepage."
