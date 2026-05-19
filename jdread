@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# 快捷 wrapper: 自动使用 venv 里的 python 运行 jdread.py
+# 用法:
+#   ./jdread 30958860
+#   ./jdread "https://ebooks.jd.com/reader/?ebookId=30958860"
+#   ./jdread --login
+set -e
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+if [ -x "$DIR/venv/bin/python" ]; then
+    PY="$DIR/venv/bin/python"
+else
+    PY="$(command -v python3 || command -v python)"
+fi
+
+exec "$PY" -u "$DIR/jdread.py" "$@"

@@ -176,3 +176,12 @@ cython_debug/
 /output
 cookies.json
 .vscode
+.DS_Store
+*.log
+ready_to_save.flag
+/bin/chromedriver
+/debug*.py
+/debug*.html
+/debug*_page.html
+/debug*_full.html
+/iframe_*.html

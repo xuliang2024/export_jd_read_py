@@ -1,4 +1,5 @@
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
@@ -9,9 +10,10 @@ import json
 
 COOKIE_FILE = "cookies.json"
 Data_Folder = "./output"
+CHROMEDRIVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "chromedriver")
 
 # 需要下载电子书的id列表
-Download_Book_List = [30601783]
+Download_Book_List = [30959622]
 
 
 def save_session(driver, file_path):
@@ -35,14 +37,27 @@ def load_session(driver, file_path):
         # 加载 Local Storage
         local_storage = json.loads(session_data["local_storage"])
         for key, value in local_storage.items():
-            driver.execute_script(f"localStorage.setItem('{key}', '{value}');")
+            try:
+                driver.execute_script(f"localStorage.setItem('{key}', '{value}');")
+            except Exception:
+                pass
         # 加载 Session Storage
         session_storage = json.loads(session_data["session_storage"])
         for key, value in session_storage.items():
-            driver.execute_script(f"sessionStorage.setItem('{key}', '{value}');")
-        # 加载 Cookies
+            try:
+                driver.execute_script(f"sessionStorage.setItem('{key}', '{value}');")
+            except Exception:
+                pass
+        # 加载 Cookies (跳过域名不匹配的)
+        skipped = 0
+        added = 0
         for cookie in session_data["cookies"]:
-            driver.add_cookie(cookie)
+            try:
+                driver.add_cookie(cookie)
+                added += 1
+            except Exception:
+                skipped += 1
+        print(f"Cookies 加载: 成功 {added}, 跳过 {skipped} (域名不匹配)")
     print(f"会话数据已从 {file_path} 加载")
 
 
@@ -133,13 +148,28 @@ def save_catalog(driver: webdriver.Chrome, bookId, outputDir):
 
 
 def save_page(driver: webdriver.Chrome, filepath):
-    element = WebDriverWait(driver, 300).until(
-        EC.presence_of_element_located(
-            (By.CLASS_NAME, "reader-chapter-content")
-        )  # 替换为实际的定位方式
+    # 京东读书 2026 版 UI:
+    # - .chapter-page 仅显示页码进度 (如 "9.52%"),不含正文
+    # - #horizontal-read-container 才包含整章正文(通过 CSS transform 横向偏移控制可见性)
+    WebDriverWait(driver, 120).until(
+        EC.presence_of_element_located((By.ID, "horizontal-read-container"))
     )
-    # element = driver.find_element(By.CLASS_NAME, "reader-chapter-content")
-    element_html = element.get_attribute("outerHTML")
+    # 等待章节内容真正渲染 (innerHTML 体积足够)
+    container = None
+    for _ in range(120):
+        container = driver.find_element(By.ID, "horizontal-read-container")
+        html_now = container.get_attribute("innerHTML") or ""
+        if len(html_now) > 300:
+            break
+        time.sleep(0.5)
+
+    # 拼接章节标题 + 正文
+    try:
+        chapter_name_html = driver.find_element(By.CLASS_NAME, "chapter-name").get_attribute("outerHTML")
+    except Exception:
+        chapter_name_html = ""
+
+    element_html = (chapter_name_html or "") + container.get_attribute("outerHTML")
     head_node = driver.find_element(By.TAG_NAME, "head")
 
     head_html = []
@@ -180,29 +210,70 @@ def checkLoginData():
 
 
 def saveLoginData(driver: webdriver.Chrome):
-    driver.get(f"https://e-m.jd.com")
-    input("登录完成后按回车继续...")
-    # 等待并手动登录
-    save_session(driver, COOKIE_FILE)
+    # 直接打开目标书的阅读器, 让用户在 ebooks.jd.com 域名上登录
+    driver.get(f"https://ebooks.jd.com/reader/?ebookId={Download_Book_List[0]}&index=0&from=3")
+    print("请在弹出的 Chrome 窗口中登录京东账号...")
+    print("(请用京东账号扫码或账密登录)")
+    print("等待登录中... (检测到登录 cookie 后会自动保存)")
+    # 轮询等待 thor cookie 出现 (登录成功标志), 最长等待 10 分钟
+    for i in range(600):
+        try:
+            cookies = driver.get_cookies()
+            if any(c.get("name") == "thor" for c in cookies):
+                print("✅ 检测到登录成功，等待页面状态稳定...")
+                # 多等几秒确保所有 cookies 写入, 并刷新一次让书本权限生效
+                time.sleep(5)
+                driver.refresh()
+                time.sleep(3)
+                save_session(driver, COOKIE_FILE)
+                return
+        except Exception as e:
+            print(f"检测异常: {e}")
+        time.sleep(1)
+    raise TimeoutError("等待登录超时 (10 分钟)")
 
 
 def loadLoginData(driver: webdriver.Chrome):
+    # 先访问 e-m.jd.com 加载原域名 cookies
     driver.get(f"https://e-m.jd.com")
-
     time.sleep(1)
     if os.path.exists(COOKIE_FILE):
         load_session(driver, COOKIE_FILE)
-        driver.refresh()
-        time.sleep(2)  # 等待 Cookies 生效
+    # 再访问 ebooks.jd.com (共享的 .jd.com cookies 自动可用)
+    driver.get(f"https://ebooks.jd.com")
+    time.sleep(2)
 
 
 def downloadBook(bookIndex, bookCount, driver: webdriver.Chrome, bookId):
     # 打开目标网站
-    driver.get(f"https://e-m.jd.com/reader/?ebookId={bookId}&index=0&from=3")
+    url = f"https://ebooks.jd.com/reader/?ebookId={bookId}&index=0&from=3"
+    print(f"打开 URL: {url}")
+    driver.get(url)
+    time.sleep(3)
+    handles = driver.window_handles
+    if len(handles) > 1:
+        driver.switch_to.window(handles[-1])
+    elif len(handles) == 0:
+        raise RuntimeError("所有 Chrome 窗口都被关闭了！")
 
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.CLASS_NAME, "reader-chapter-content"))
+    # 等到正文容器渲染出来 (说明已通过授权)
+    WebDriverWait(driver, 120).until(
+        EC.presence_of_element_located((By.ID, "horizontal-read-container"))
     )
+    time.sleep(3)
+
+    # 验证书的访问状态
+    state = driver.execute_script(
+        """
+        try {
+            const s = Reader.$store.state;
+            return {buyState:s.buyState, isLogin:s.isLogin, exception:s.exception, ebookName:s.ebookName};
+        } catch(e) { return {error: e.toString()}; }
+        """
+    )
+    print(f"书籍状态: {state}")
+    if state.get("buyState") is False or state.get("exception") not in (None, 0):
+        raise RuntimeError(f"无权阅读此书: {state}")
 
     title = driver.title
     print(f"开始下载:{title}")
@@ -223,7 +294,7 @@ def downloadBook(bookIndex, bookCount, driver: webdriver.Chrome, bookId):
         chapter_item = it["chapter_item"]
         if chapter_item != last_chapter_item:
             driver.get(
-                f"https://e-m.jd.com/reader/?ebookId={bookId}&index={index}&from=3"
+                f"https://ebooks.jd.com/reader/?ebookId={bookId}&index={index}&from=3"
             )
             savePath = f"{outputDataDir}/{chapter_item}"
             save_page(driver, savePath)
@@ -237,7 +308,16 @@ def main():
 
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")  # 最大化窗口
-    driver = webdriver.Chrome(options=options)
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-features=SitePerProcess")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    service = Service(executable_path=CHROMEDRIVER_PATH)
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+    )
 
     try:
         if checkLoginData():
@@ -247,6 +327,14 @@ def main():
         else:
             saveLoginData(driver)
 
+    except Exception as e:
+        import traceback
+        print(f"❌ 出错: {e}")
+        traceback.print_exc()
+        print(f"当前 URL: {driver.current_url}")
+        print(f"当前 Title: {driver.title}")
+        print("Chrome 窗口将保持打开 5 分钟以便排查...")
+        time.sleep(300)
     finally:
         # 关闭 WebDriver
         driver.quit()
